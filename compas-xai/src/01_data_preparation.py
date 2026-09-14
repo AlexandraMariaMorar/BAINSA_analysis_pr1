@@ -1,6 +1,16 @@
 import pandas as pd
+from pathlib import Path
 
-DATA_PATH = "/Users/alexandramariamorar/Documents/Projects/InterpretableVsExplainble/BAINSA_analysis_pr1/compas-xai/data/processed/propublica_data_for_fairml.csv"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+DATA_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "propublica_data_for_fairml.csv"
+)
+
+
 
 df = pd.read_csv(DATA_PATH) # creating a pandas data frame from the csv file; store it in a variable df (data frame)
 
@@ -40,3 +50,23 @@ print(df.describe().T) # used the transpose for easier reading of the summary st
 print("\nUnique values per column:")
 for col in df.columns:
     print(f"{col}: {df[col].nunique()} unique values")
+
+TARGET = "Two_yr_Recidivism"
+
+PRIMARY_FEATURES = [
+    "Number_of_Priors",
+    "Age_Above_FourtyFive",
+    "Age_Below_TwentyFive",
+    "Female",
+    "Misdemeanor"
+]
+
+X = df[PRIMARY_FEATURES].copy()
+y = df[TARGET].copy()
+
+# score_factor:
+# excluded because it is derived from the COMPAS risk score
+
+# race variables:
+# excluded from the primary analysis;
+# will be added later in a sensitivity analysis
