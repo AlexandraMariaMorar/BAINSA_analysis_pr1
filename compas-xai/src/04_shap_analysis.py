@@ -535,7 +535,7 @@ def summarize_shap_stability(combined_importance):
     return summary
 
 def main():
-    run_shap_robustness()
+    run_shap_analysis(42)
 
 
 if __name__ == "__main__":
