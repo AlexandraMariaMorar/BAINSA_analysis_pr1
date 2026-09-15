@@ -1,0 +1,6 @@
+feature,mean_abs_shap
+Number_of_Priors,0.64065325
+Age_Below_TwentyFive,0.27871254
+Age_Above_FourtyFive,0.18386737
+Misdemeanor,0.116415665
+Female,0.09826919

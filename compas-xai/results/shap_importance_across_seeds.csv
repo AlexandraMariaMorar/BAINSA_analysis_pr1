@@ -1,0 +1,16 @@
+seed,feature,mean_abs_shap
+7,Number_of_Priors,0.65257907
+7,Age_Above_FourtyFive,0.18618697
+7,Age_Below_TwentyFive,0.29029122
+7,Female,0.09874788
+7,Misdemeanor,0.06985555
+21,Number_of_Priors,0.633998
+21,Age_Above_FourtyFive,0.19795325
+21,Age_Below_TwentyFive,0.27746132
+21,Female,0.10039548
+21,Misdemeanor,0.09389895
+42,Number_of_Priors,0.64065325
+42,Age_Above_FourtyFive,0.18386737
+42,Age_Below_TwentyFive,0.27871254
+42,Female,0.09826919
+42,Misdemeanor,0.116415665

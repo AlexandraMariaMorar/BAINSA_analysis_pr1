@@ -39,7 +39,7 @@ VALID_SEEDS = [7, 21, 42] #predefined random seeds, frozen train/test splits cre
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1] #compas-xai
 
-DATA_PATH = PROJECT_ROOT / "data" / "processed" / "propublica_data_for_fairml.csv"
+DATA_PATH = PROJECT_ROOT / "data" / "processed" / "clean_compas.csv"
 SPLITS_DIR = PROJECT_ROOT / "splits"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
@@ -88,24 +88,39 @@ def load_split(seed):
             f"Seed must be one of {VALID_SEEDS}"
         )
 
-    train_path = SPLITS_DIR / f"train_seed{seed}.csv"
-    test_path = SPLITS_DIR / f"test_seed{seed}.csv"
+    split_path = SPLITS_DIR / f"split_seed{seed}.csv"
 
-    if not train_path.exists():
+    if not split_path.exists():
         raise FileNotFoundError(
-            f"Training split not found: {train_path}"
+            f"Split file not found: {split_path}"
         )
 
-    if not test_path.exists():
-        raise FileNotFoundError(
-            f"Test split not found: {test_path}"
+    split_data = pd.read_csv(split_path)
+
+    required_columns = {"row_id", "split"}
+    missing_columns = required_columns - set(split_data.columns)
+
+    if missing_columns:
+        raise ValueError(
+            f"Split file is missing columns: {missing_columns}"
         )
 
-    #Load the train/test splits from CSV files
-    #80% of the data is used for training, and 20% is used for testing
+    unexpected_values = (
+        set(split_data["split"]) - {"train", "test"}
+    )
 
-    train_split = pd.read_csv(train_path) 
-    test_split = pd.read_csv(test_path)
+    if unexpected_values:
+        raise ValueError(
+            f"Unexpected split labels: {unexpected_values}"
+        )
+
+    train_split = split_data[
+        split_data["split"] == "train"
+    ].copy()
+
+    test_split = split_data[
+        split_data["split"] == "test"
+    ].copy()
 
     return train_split, test_split
 
@@ -124,6 +139,16 @@ def validate_split(train_split, test_split):
 
     train_ids = set(train_split["row_id"])
     test_ids = set(test_split["row_id"])
+
+    if len(train_ids) != len(train_split):
+        raise ValueError(
+            "Duplicate row IDs found in training split."
+        )
+
+    if len(test_ids) != len(test_split):
+        raise ValueError(
+            "Duplicate row IDs found in test split."
+        )
 
     overlap = train_ids.intersection(test_ids)
 
@@ -264,53 +289,9 @@ def train_final_xgboost(X_train, y_train, seed, best_params): #training one fina
     return model
 
 def evaluate_xgboost(model, X_test, y_test):
-    probabilities = model.predict_proba(X_test)[:, 1] #turns probabilities into predicted classes using the fixed 0.5 threshold
+    probabilities = model.predict_proba(X_test)[:, 1] 
 
-    predictions = (probabilities >= 0.5).astype(int)
-
-    auc = roc_auc_score(y_test, probabilities)
-    accuracy = accuracy_score(y_test, predictions)
-    precision = precision_score(y_test, predictions)
-    recall = recall_score(y_test, predictions)
-    f1 = f1_score(y_test, predictions)
-    brier = brier_score_loss(y_test, probabilities)
-
-    tn, fp, fn, tp = confusion_matrix(
-        y_test,
-        predictions,
-        labels=[0, 1],
-    ).ravel()
-
-    metrics = {
-        "roc_auc": auc,
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "brier_score": brier,
-        "true_negatives": int(tn),
-        "false_positives": int(fp),
-        "false_negatives": int(fn),
-        "true_positives": int(tp),
-    }
-
-    return metrics, predictions, probabilities
-
-def train_final_xgboost(X_train, y_train, seed, best_params):
-    model = build_xgboost_model(
-        seed=seed,
-        max_depth=best_params["max_depth"],
-        n_estimators=best_params["n_estimators"],
-    )
-
-    model.fit(X_train, y_train)
-
-    return model
-
-def evaluate_xgboost(model, X_test, y_test):
-    probabilities = model.predict_proba(X_test)[:, 1]
-
-    predictions = (probabilities >= 0.5).astype(int)
+    predictions = (probabilities >= 0.5).astype(int) #turns probabilities into predicted classes using the fixed 0.5 threshold
 
     auc = roc_auc_score(y_test, probabilities)
     accuracy = accuracy_score(y_test, predictions)
@@ -463,18 +444,86 @@ def run_seed_experiment(seed):
         "best_params": best_params,
     }
 
+def run_robustness_experiment(best_params):
+    results = []
+
+    for seed in VALID_SEEDS:
+        data = load_clean_data()
+        validate_data(data)
+
+        train_split, test_split = load_split(seed)
+        validate_split(train_split, test_split)
+
+        X_train, X_test, y_train, y_test = build_train_test_sets(
+            data,
+            train_split,
+            test_split,
+        )
+
+        model = train_final_xgboost(
+            X_train,
+            y_train,
+            seed,
+            best_params,
+        )
+
+        save_xgboost_model(
+            model,
+            seed,
+        )
+
+        metrics, predictions, probabilities = evaluate_xgboost(
+            model,
+            X_test,
+            y_test,
+        )
+
+        results.append({
+            "seed": seed,
+            "max_depth": best_params["max_depth"],
+            "n_estimators": best_params["n_estimators"],
+            **metrics,
+        })
+
+        save_xgboost_outputs(
+            test_split,
+            y_test,
+            predictions,
+            probabilities,
+            metrics,
+            seed,
+        )
+
+        print(
+            f"Seed {seed}: "
+            f"AUC={metrics['roc_auc']:.4f}, "
+            f"Accuracy={metrics['accuracy']:.4f}, "
+            f"Brier={metrics['brier_score']:.4f}"
+        )
+
+    results_df = pd.DataFrame(results)
+
+    output_path = (
+        RESULTS_DIR / "xgb_robustness_summary.csv"
+    )
+
+    results_df.to_csv(
+        output_path,
+        index=False,
+    )
+
+    print("\nRobustness summary:")
+    print(results_df)
+
+    return results_df
+
 def main():
-    data = load_clean_data()
+    best_params = {
+        "max_depth": 2,
+        "n_estimators": 150,
+    }
 
-    validate_data(data)
-
-    X, y = create_feature_target(data)
-
-    print("Dataset loaded successfully.")
-    print(f"Rows: {len(data)}")
-    print(f"Features: {list(X.columns)}")
-    print(f"Target: {TARGET}")
-    print(f"Target prevalence: {y.mean():.3f}")
+    run_robustness_experiment(best_params)
 
 #ensure run case of main()
 if __name__ == "__main__":
