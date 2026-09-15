@@ -278,10 +278,21 @@ def run_robustness_experiment(C):  # P1-9: repeat fixed model logic across all s
     coefficient_rows = []
 
     for seed in VALID_SEEDS:
-        X_train, X_test, y_train, y_test, _ = build_train_test_sets(data, load_split(seed))
+        X_train, X_test, y_train, y_test, test_ids = build_train_test_sets(data, load_split(seed))
 
         pipeline = train_final_model(X_train, y_train, C)
-        _, _, metrics = evaluate_model(pipeline, X_test, y_test)
+        probabilities, predictions, metrics = evaluate_model(pipeline, X_test, y_test)
+
+        # the paired comparison needs predictions for every seed, not just the primary one
+        save_table(
+            pd.DataFrame({
+                "row_id": test_ids.values,
+                "actual": y_test.values,
+                "predicted_probability": probabilities,
+                "predicted_class": predictions,
+            }),
+            f"logistic_predictions_seed{seed}.csv",
+        )
 
         seed_rows.append({"seed": seed, "C": C, **metrics})
 

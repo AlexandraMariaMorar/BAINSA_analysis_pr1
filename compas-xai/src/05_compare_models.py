@@ -275,6 +275,37 @@ def summarize_comparison(comparison_df):
 
     return summary_df
 
+def compare_feature_reliance():
+    # Coefficients and SHAP values are in DIFFERENT units and must not be compared
+    # as magnitudes: the logistic coefficient for Number_of_Priors is per standardized
+    # unit, while mean |SHAP| is in the model's log-odds output units.
+    # Only the ORDERING of the features is comparable across the two models.
+    coefficients = pd.read_csv(RESULTS_DIR / "logistic_coefficients.csv")
+    shap_importance = pd.read_csv(RESULTS_DIR / "shap_global_importance.csv")
+
+    logistic = coefficients[["feature", "coefficient"]].copy()
+    logistic["abs_coefficient"] = logistic["coefficient"].abs()
+    logistic["logistic_rank"] = logistic["abs_coefficient"].rank(ascending=False).astype(int)
+
+    xgb = shap_importance[["feature", "mean_abs_shap"]].copy()
+    xgb["shap_rank"] = xgb["mean_abs_shap"].rank(ascending=False).astype(int)
+
+    comparison = logistic.merge(xgb, on="feature", validate="one_to_one")
+    comparison["rank_difference"] = comparison["logistic_rank"] - comparison["shap_rank"]
+    comparison = comparison.sort_values("logistic_rank")
+
+    output_path = RESULTS_DIR / "feature_reliance_comparison.csv"
+    comparison.to_csv(output_path, index=False)
+
+    print("\nFeature reliance comparison (rank-based):")
+    print(comparison.to_string(index=False))
+    print(f"\nRankings identical across models: "
+          f"{bool((comparison['rank_difference'] == 0).all())}")
+    print(f"Feature reliance comparison saved to: {output_path}")
+
+    return comparison
+
+
 def save_probability_disagreements(seed):
     logistic_predictions = load_predictions(
         "logistic",
@@ -347,18 +378,6 @@ def save_probability_disagreements(seed):
 
     return comparison
 
-def run_full_comparison():
-    comparison_df = compare_all_seeds()
-
-    summarize_comparison(
-        comparison_df
-    )
-
-    save_probability_disagreements(
-        seed=42
-    )
-
-    return comparison_df
 
 def run_full_comparison():
     comparison_df = compare_all_seeds()
@@ -378,6 +397,11 @@ def run_full_comparison():
     save_auc_delta_plot(
         comparison_df
     )
+    compare_feature_reliance(
+
+    )
+
+    
 
     return comparison_df
 
@@ -487,11 +511,7 @@ def save_auc_delta_plot(comparison_df):
 
 
 def main():
-    print(
-        "Model comparison code is ready. "
-        "Waiting for logistic and XGBoost "
-        "prediction files."
-    )
+    run_full_comparison()
 
 
 if __name__ == "__main__":

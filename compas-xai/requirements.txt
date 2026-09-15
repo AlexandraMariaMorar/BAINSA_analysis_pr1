@@ -1,7 +1,13 @@
-pandas
-numpy
-scikit-learn
-xgboost
-shap
-matplotlib
-scipy
+# Python 3.11 (see .python-version)
+# Install:  pip install -r requirements.txt
+#
+# Versions are pinned to those used to produce the committed files in results/.
+# If you loosen them, re-run the full analysis and confirm the outputs are unchanged.
+
+pandas==3.0.5
+numpy==2.4.6
+scikit-learn==1.9.1
+xgboost==3.2.0
+shap==0.51.0
+matplotlib==3.11.2
+scipy==1.17.1
