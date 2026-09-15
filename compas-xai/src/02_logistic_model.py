@@ -93,9 +93,8 @@ for C in C_GRID:
 
     print(f"{C:>6} {cv_scores.mean():>12.4f} {cv_scores.std():>11.4f} {n_nonzero:>15}")
 
-# --------------------------------------------------
-# FINAL MODEL (P1-6) — test set is touched from here on
-# --------------------------------------------------
+# FINAL MODEL 
+
 
 CHOSEN_C = 0.03  # highest CV AUC and the strongest regularization keeping all 5 features
 
@@ -110,9 +109,9 @@ pipeline.fit(X_train, y_train)
 test_prob = pipeline.predict_proba(X_test)[:, 1]
 test_pred = pipeline.predict(X_test)
 
-# --------------------------------------------------
-# TEST METRICS (P1-7)
-# --------------------------------------------------
+
+# TEST METRICS 
+
 
 metrics = {
     "seed": PRIMARY_SEED,
@@ -124,11 +123,11 @@ metrics = {
     "precision": precision_score(y_test, test_pred),
     "recall": recall_score(y_test, test_pred),
     "f1": f1_score(y_test, test_pred),
-    "brier": brier_score_loss(y_test, test_prob),
+    "brier_score": brier_score_loss(y_test, test_prob),
 }
 
-tn, fp, fn, tp = confusion_matrix(y_test, test_pred).ravel()
-metrics.update({"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)})
+true_negatives, false_positives, false_negatives, true_positives = confusion_matrix(y_test, test_pred).ravel()
+metrics.update({"true_negatives": int(true_negatives), "false_positives": int(false_positives), "false_negatives": int(false_negatives), "true_positives": int(true_positives)})
 
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 pd.DataFrame([metrics]).to_csv(
@@ -139,9 +138,9 @@ print(f"\n=== test metrics (seed {PRIMARY_SEED}, C={CHOSEN_C}) ===")
 for name, value in metrics.items():
     print(f"  {name:10} {value}")
 
-# --------------------------------------------------
-# PREDICTIONS FILE (§8 handoff schema)
-# --------------------------------------------------
+
+# PREDICTIONS FILE 
+
 
 predictions = pd.DataFrame({
     "row_id": test["row_id"].values,
@@ -153,9 +152,9 @@ predictions.to_csv(
     RESULTS_DIR / f"logistic_predictions_seed{PRIMARY_SEED}.csv", index=False
 )
 
-# --------------------------------------------------
+
 # COEFFICIENTS + ODDS RATIOS (P1-8)
-# --------------------------------------------------
+
 
 feature_names = [
     name.split("__", 1)[1]
@@ -176,3 +175,71 @@ print(coefficients.to_string(index=False))
 print(f"\nintercept: {pipeline.named_steps['logreg'].intercept_[0]:.4f}")
 print(f"priors SD used for scaling: "
       f"{pipeline.named_steps['preprocess'].named_transformers_['scale_priors'].scale_[0]:.4f}")
+
+
+# ROBUSTNESS ACROSS SEEDS 
+
+ALL_SEEDS = [7, 21, 42]
+
+seed_rows = []
+coef_rows = []
+
+for seed in ALL_SEEDS:
+    seed_split = pd.read_csv(SPLITS_DIR / f"split_seed{seed}.csv")
+    seed_merged = clean.merge(seed_split, on="row_id", validate="one_to_one")
+
+    seed_train = seed_merged[seed_merged["split"] == "train"]
+    seed_test = seed_merged[seed_merged["split"] == "test"]
+
+    pipeline.set_params(logreg__C=CHOSEN_C)
+    pipeline.fit(seed_train[PRIMARY_FEATURES], seed_train[TARGET])
+
+    seed_y = seed_test[TARGET]
+    seed_prob = pipeline.predict_proba(seed_test[PRIMARY_FEATURES])[:, 1]
+    seed_pred = pipeline.predict(seed_test[PRIMARY_FEATURES])
+
+    s_tn, s_fp, s_fn, s_tp = confusion_matrix(seed_y, seed_pred).ravel()
+
+    seed_rows.append({
+        "seed": seed,
+        "C": CHOSEN_C, #C stays pinned at 0.03; no re-tuning for each seed because we want to see how the same model performs across different splits
+        "roc_auc": roc_auc_score(seed_y, seed_prob),
+        "accuracy": accuracy_score(seed_y, seed_pred),
+        "precision": precision_score(seed_y, seed_pred),
+        "recall": recall_score(seed_y, seed_pred),
+        "f1": f1_score(seed_y, seed_pred),
+        "brier_score": brier_score_loss(seed_y, seed_prob),
+        "true_negatives": int(s_tn),
+        "false_positives": int(s_fp),
+        "false_negatives": int(s_fn),
+        "true_positives": int(s_tp),
+    })
+
+    for name, value in zip(feature_names, pipeline.named_steps["logreg"].coef_[0]):
+        coef_rows.append({"seed": seed, "feature": name, "coefficient": value})
+
+robustness = pd.DataFrame(seed_rows)
+robustness.to_csv(RESULTS_DIR / "logistic_robustness_summary.csv", index=False)
+
+coef_long = pd.DataFrame(coef_rows)
+stability = (
+    coef_long.groupby("feature")["coefficient"]
+    .agg(
+        mean="mean",
+        std="std",
+        min="min",
+        max="max",
+        seeds_non_zero=lambda s: int((s != 0).sum()),
+        sign_stable=lambda s: len(set(np.sign(s[s != 0]))) <= 1,#checks whether a coef ever flips direction across seeds
+    )#a feature that looks protective in one split and risk-increasing in another => the model can't pin it down => shouldnt be interpreted
+    .reset_index()
+    .sort_values("mean", key=abs, ascending=False)
+)
+stability.to_csv(RESULTS_DIR / "logistic_coefficient_stability.csv", index=False)
+
+print("\n=== robustness across seeds ===")
+print(robustness.to_string(index=False))
+print("\n=== coefficient stability ===")
+print(stability.to_string(index=False))
+print(f"\nAUC spread across seeds: "
+      f"{robustness['roc_auc'].max() - robustness['roc_auc'].min():.4f}")

@@ -1,2 +1,2 @@
-seed,C,n_train,n_test,roc_auc,accuracy,precision,recall,f1,brier,tn,fp,fn,tp
+seed,C,n_train,n_test,roc_auc,accuracy,precision,recall,f1,brier_score,true_negatives,false_positives,false_negatives,true_positives
 42,0.03,4937,1235,0.7301600101526601,0.6834008097165992,0.687089715536105,0.5587188612099644,0.6162904808635917,0.2118921632216551,530,143,248,314
