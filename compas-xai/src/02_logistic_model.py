@@ -1,6 +1,6 @@
-import pandas as pd
-import numpy as np
 from pathlib import Path
+import numpy as np
+import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -16,17 +16,9 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-CLEAN_PATH = PROJECT_ROOT / "data" / "processed" / "clean_compas.csv"
-SPLITS_DIR = PROJECT_ROOT / "splits"
-RESULTS_DIR = PROJECT_ROOT / "results"
-
-
-PRIMARY_SEED = 42  # 1 st i will tune C on this seed and then i ll refit the chosen C on all three seeds 
-
+# capital lettered variables are configuration values that should not change while the program runs
 TARGET = "Two_yr_Recidivism"
+
 PRIMARY_FEATURES = [
     "Number_of_Priors",
     "Age_Above_FourtyFive",
@@ -34,212 +26,310 @@ PRIMARY_FEATURES = [
     "Female",
     "Misdemeanor",
 ]
+
 SCALE_FEATURES = ["Number_of_Priors"]  # the only non-binary feature
 
-# load the primary seed training rows from the split 
-
-clean = pd.read_csv(CLEAN_PATH)
-split = pd.read_csv(SPLITS_DIR / f"split_seed{PRIMARY_SEED}.csv")
-
-merged = clean.merge(split, on="row_id", validate="one_to_one")
-
-train = merged[merged["split"] == "train"]
-
-X_train = train[PRIMARY_FEATURES]
-y_train = train[TARGET]
-
-print(f"seed {PRIMARY_SEED} training rows: {len(X_train)}")
-
-preprocessor = ColumnTransformer( # reorders collums ; issue rn 
-    transformers=[("scale_priors", StandardScaler(), SCALE_FEATURES)],
-    remainder="passthrough",
-)
-
-model = LogisticRegression(
-    l1_ratio = 1,  # pure l1
-    solver="liblinear",
-    max_iter=1000,
-    random_state=PRIMARY_SEED,
-)
-
-pipeline = Pipeline([
-    ("preprocess", preprocessor),
-    ("logreg", model),
-])
-
-C_GRID = [0.01, 0.03, 0.1, 0.3, 1, 3] # they are 6 because number of points = (range in decades = 2.5 ÷ step size = 0.5) + 1 = 6 
-# 0.01 was chosen as a lower bound because below it every coefficient goes to 0 
-# 3 was chosen as an upper bound because above it the coefficients stop changing substantially  
-
-
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=PRIMARY_SEED)
-
-print("\nC               = regularization strength; SMALLER = stronger penalty = simpler model")
-print("CV AUC mean     = average ROC-AUC over 5 training folds")
-print("CV AUC std      = spread across those folds; gaps smaller than this are noise, not signal")
-print("non-zero coefs  = how many of the 5 features survived L1 shrinkage")
-
-print(f"\n{'C':>6} {'CV AUC mean':>12} {'CV AUC std':>11} {'non-zero coefs':>15}")
-
-
-for C in C_GRID:
-    pipeline.set_params(logreg__C=C)
-
-    cv_scores = cross_val_score(pipeline, X_train, y_train, cv=cv, scoring="roc_auc")
-
-    pipeline.fit(X_train, y_train)
-    coefs = pipeline.named_steps["logreg"].coef_[0]
-    n_nonzero = int((coefs != 0).sum())
-
-    print(f"{C:>6} {cv_scores.mean():>12.4f} {cv_scores.std():>11.4f} {n_nonzero:>15}")
-
-# FINAL MODEL 
-
+C_GRID = [0.01, 0.03, 0.1, 0.3, 1, 3]  # half-decade steps from 10^-2 to 10^0.5
 
 CHOSEN_C = 0.03  # highest CV AUC and the strongest regularization keeping all 5 features
 
-test = merged[merged["split"] == "test"]
+PRIMARY_SEED = 42  # C is tuned on this seed; the other seeds reuse the frozen value
 
-X_test = test[PRIMARY_FEATURES]
-y_test = test[TARGET]
+VALID_SEEDS = [7, 21, 42]  # frozen train/test splits created in 01_data_preparation.py
 
-pipeline.set_params(logreg__C=CHOSEN_C)
-pipeline.fit(X_train, y_train)
+CV_FOLDS = 5
 
-test_prob = pipeline.predict_proba(X_test)[:, 1]
-test_pred = pipeline.predict(X_test)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # compas-xai
 
-
-# TEST METRICS 
+CLEAN_PATH = PROJECT_ROOT / "data" / "processed" / "clean_compas.csv"
+SPLITS_DIR = PROJECT_ROOT / "splits"
+RESULTS_DIR = PROJECT_ROOT / "results"
 
 
-metrics = {
-    "seed": PRIMARY_SEED,
-    "C": CHOSEN_C,
-    "n_train": len(X_train),
-    "n_test": len(X_test),
-    "roc_auc": roc_auc_score(y_test, test_prob),
-    "accuracy": accuracy_score(y_test, test_pred),
-    "precision": precision_score(y_test, test_pred),
-    "recall": recall_score(y_test, test_pred),
-    "f1": f1_score(y_test, test_pred),
-    "brier_score": brier_score_loss(y_test, test_prob),
-}
+def load_clean_data():
+    data = pd.read_csv(CLEAN_PATH)
 
-true_negatives, false_positives, false_negatives, true_positives = confusion_matrix(y_test, test_pred).ravel()
-metrics.update({"true_negatives": int(true_negatives), "false_positives": int(false_positives), "false_negatives": int(false_negatives), "true_positives": int(true_positives)})
+    if "row_id" not in data.columns:
+        raise ValueError("Clean dataset must contain a 'row_id' column.")
 
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-pd.DataFrame([metrics]).to_csv(
-    RESULTS_DIR / f"logistic_metrics_seed{PRIMARY_SEED}.csv", index=False
-)
+    if TARGET not in data.columns:
+        raise ValueError(f"Clean dataset must contain the target '{TARGET}'.")
 
-print(f"\n=== test metrics (seed {PRIMARY_SEED}, C={CHOSEN_C}) ===")
-for name, value in metrics.items():
-    print(f"  {name:10} {value}")
+    return data
 
 
-# PREDICTIONS FILE 
+def validate_features(X):  # enforces the non-negotiable exclusion rules
+    if TARGET in X.columns:
+        raise ValueError("Target leaked into the feature matrix.")
+
+    unexpected = [column for column in X.columns if column not in PRIMARY_FEATURES]
+
+    if unexpected:
+        raise ValueError(f"Unexpected columns in X: {unexpected}")
 
 
-predictions = pd.DataFrame({
-    "row_id": test["row_id"].values,
-    "actual": y_test.values,
-    "predicted_probability": test_prob,
-    "predicted_class": test_pred,
-})
-predictions.to_csv(
-    RESULTS_DIR / f"logistic_predictions_seed{PRIMARY_SEED}.csv", index=False
-)
+def load_split(seed):
+    if seed not in VALID_SEEDS:
+        raise ValueError(f"Seed {seed} is not one of the frozen seeds {VALID_SEEDS}.")
+
+    return pd.read_csv(SPLITS_DIR / f"split_seed{seed}.csv")
 
 
-# COEFFICIENTS + ODDS RATIOS (P1-8)
+def build_train_test_sets(data, split):  # (clean dataset, split table for one seed)
+    merged = data.merge(split, on="row_id", validate="one_to_one")
+
+    train = merged[merged["split"] == "train"]
+    test = merged[merged["split"] == "test"]
+
+    # Safety check: no person/row should appear in both sets
+    overlap = set(train["row_id"]).intersection(test["row_id"])
+
+    if overlap:
+        raise ValueError(f"Train/test overlap detected: {len(overlap)} shared rows.")
+
+    X_train = train[PRIMARY_FEATURES]
+    X_test = test[PRIMARY_FEATURES]
+
+    validate_features(X_train)
+    validate_features(X_test)
+
+    return X_train, X_test, train[TARGET], test[TARGET], test["row_id"]
 
 
-feature_names = [
-    name.split("__", 1)[1]
-    for name in pipeline.named_steps["preprocess"].get_feature_names_out()
-]
-coefs = pipeline.named_steps["logreg"].coef_[0]
+def build_pipeline(C):  # (inverse regularization strength; smaller = stronger penalty)
+    preprocessor = ColumnTransformer(
+        transformers=[("scale_priors", StandardScaler(), SCALE_FEATURES)],
+        remainder="passthrough",
+    )
 
-coefficients = pd.DataFrame({
-    "feature": feature_names,
-    "coefficient": coefs,
-    "odds_ratio": np.exp(coefs),
-    "non_zero": coefs != 0,
-})
-coefficients.to_csv(RESULTS_DIR / "logistic_coefficients.csv", index=False)
+    # random_state stays fixed across seeds so that seed-to-seed differences come
+    # only from the split, not from the solver
+    model = LogisticRegression(
+        l1_ratio=1,  # pure L1
+        solver="liblinear",
+        C=C,
+        max_iter=1000,
+        random_state=PRIMARY_SEED,
+    )
 
-print(f"\n=== coefficients (C={CHOSEN_C}) ===")
-print(coefficients.to_string(index=False))
-print(f"\nintercept: {pipeline.named_steps['logreg'].intercept_[0]:.4f}")
-print(f"priors SD used for scaling: "
-      f"{pipeline.named_steps['preprocess'].named_transformers_['scale_priors'].scale_[0]:.4f}")
+    return Pipeline([("preprocess", preprocessor), ("logreg", model)])
 
 
-# ROBUSTNESS ACROSS SEEDS 
+def tune_C(X_train, y_train):  # training-only cross-validation over C_GRID
+    cross_validator = StratifiedKFold(
+        n_splits=CV_FOLDS,
+        shuffle=True,
+        random_state=PRIMARY_SEED,
+    )
 
-ALL_SEEDS = [7, 21, 42]
+    rows = []
 
-seed_rows = []
-coef_rows = []
+    for C in C_GRID:
+        pipeline = build_pipeline(C)
 
-for seed in ALL_SEEDS:
-    seed_split = pd.read_csv(SPLITS_DIR / f"split_seed{seed}.csv")
-    seed_merged = clean.merge(seed_split, on="row_id", validate="one_to_one")
+        scores = cross_val_score(
+            pipeline,
+            X_train,
+            y_train,
+            cv=cross_validator,
+            scoring="roc_auc",
+        )
 
-    seed_train = seed_merged[seed_merged["split"] == "train"]
-    seed_test = seed_merged[seed_merged["split"] == "test"]
+        # refit on the whole training split to count surviving coefficients
+        pipeline.fit(X_train, y_train)
 
-    pipeline.set_params(logreg__C=CHOSEN_C)
-    pipeline.fit(seed_train[PRIMARY_FEATURES], seed_train[TARGET])
+        rows.append({
+            "C": C,
+            "cv_auc_mean": scores.mean(),
+            "cv_auc_std": scores.std(),
+            "non_zero_coefs": int((pipeline.named_steps["logreg"].coef_[0] != 0).sum()),
+        })
 
-    seed_y = seed_test[TARGET]
-    seed_prob = pipeline.predict_proba(seed_test[PRIMARY_FEATURES])[:, 1]
-    seed_pred = pipeline.predict(seed_test[PRIMARY_FEATURES])
+    return pd.DataFrame(rows)
 
-    s_tn, s_fp, s_fn, s_tp = confusion_matrix(seed_y, seed_pred).ravel()
 
-    seed_rows.append({
-        "seed": seed,
-        "C": CHOSEN_C, #C stays pinned at 0.03; no re-tuning for each seed because we want to see how the same model performs across different splits
-        "roc_auc": roc_auc_score(seed_y, seed_prob),
-        "accuracy": accuracy_score(seed_y, seed_pred),
-        "precision": precision_score(seed_y, seed_pred),
-        "recall": recall_score(seed_y, seed_pred),
-        "f1": f1_score(seed_y, seed_pred),
-        "brier_score": brier_score_loss(seed_y, seed_prob),
-        "true_negatives": int(s_tn),
-        "false_positives": int(s_fp),
-        "false_negatives": int(s_fn),
-        "true_positives": int(s_tp),
+def train_final_model(X_train, y_train, C):
+    pipeline = build_pipeline(C)
+    pipeline.fit(X_train, y_train)
+
+    return pipeline
+
+
+def evaluate_model(pipeline, X_test, y_test):
+    probabilities = pipeline.predict_proba(X_test)[:, 1]  # column 1 = positive class
+    predictions = pipeline.predict(X_test)
+
+    tn, fp, fn, tp = confusion_matrix(y_test, predictions).ravel()
+
+    metrics = {
+        "roc_auc": roc_auc_score(y_test, probabilities),
+        "accuracy": accuracy_score(y_test, predictions),
+        "precision": precision_score(y_test, predictions),
+        "recall": recall_score(y_test, predictions),
+        "f1": f1_score(y_test, predictions),
+        "brier_score": brier_score_loss(y_test, probabilities),
+        "true_negatives": int(tn),
+        "false_positives": int(fp),
+        "false_negatives": int(fn),
+        "true_positives": int(tp),
+    }
+
+    return probabilities, predictions, metrics
+
+
+def extract_coefficients(pipeline):
+    # ColumnTransformer reorders columns, so names must come from the fitted transformer
+    feature_names = [
+        name.split("__", 1)[1]
+        for name in pipeline.named_steps["preprocess"].get_feature_names_out()
+    ]
+
+    coefficients = pipeline.named_steps["logreg"].coef_[0]
+
+    return pd.DataFrame({
+        "feature": feature_names,
+        "coefficient": coefficients,
+        "odds_ratio": np.exp(coefficients),
+        "non_zero": coefficients != 0,
     })
 
-    for name, value in zip(feature_names, pipeline.named_steps["logreg"].coef_[0]):
-        coef_rows.append({"seed": seed, "feature": name, "coefficient": value})
 
-robustness = pd.DataFrame(seed_rows)
-robustness.to_csv(RESULTS_DIR / "logistic_robustness_summary.csv", index=False)
+def get_priors_scale(pipeline):  # SD used to standardize Number_of_Priors
+    scaler = pipeline.named_steps["preprocess"].named_transformers_["scale_priors"]
 
-coef_long = pd.DataFrame(coef_rows)
-stability = (
-    coef_long.groupby("feature")["coefficient"]
-    .agg(
-        mean="mean",
-        std="std",
-        min="min",
-        max="max",
-        seeds_non_zero=lambda s: int((s != 0).sum()),
-        sign_stable=lambda s: len(set(np.sign(s[s != 0]))) <= 1,#checks whether a coef ever flips direction across seeds
-    )#a feature that looks protective in one split and risk-increasing in another => the model can't pin it down => shouldnt be interpreted
-    .reset_index()
-    .sort_values("mean", key=abs, ascending=False)
-)
-stability.to_csv(RESULTS_DIR / "logistic_coefficient_stability.csv", index=False)
+    return scaler.scale_[0]
 
-print("\n=== robustness across seeds ===")
-print(robustness.to_string(index=False))
-print("\n=== coefficient stability ===")
-print(stability.to_string(index=False))
-print(f"\nAUC spread across seeds: "
-      f"{robustness['roc_auc'].max() - robustness['roc_auc'].min():.4f}")
+
+def save_table(table, filename):
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    output_path = RESULTS_DIR / filename
+    table.to_csv(output_path, index=False)
+
+    return output_path
+
+
+def print_tuning_table(tuning_results):
+    print("\nC               = regularization strength; SMALLER = stronger penalty = simpler model")
+    print("CV AUC mean     = average ROC-AUC over 5 training folds")
+    print("CV AUC std      = spread across those folds; gaps smaller than this are noise, not signal")
+    print("non-zero coefs  = how many of the 5 features survived L1 shrinkage")
+
+    print(f"\n{'C':>6} {'CV AUC mean':>12} {'CV AUC std':>11} {'non-zero coefs':>15}")
+
+    for row in tuning_results.itertuples(index=False):
+        print(f"{row.C:>6} {row.cv_auc_mean:>12.4f} {row.cv_auc_std:>11.4f} {row.non_zero_coefs:>15}")
+
+
+def run_primary_experiment(seed, C):  # P1-4 to P1-8: tune, fit, evaluate, export
+    data = load_clean_data()
+    split = load_split(seed)
+
+    X_train, X_test, y_train, y_test, test_ids = build_train_test_sets(data, split)
+
+    print(f"seed {seed} training rows: {len(X_train)}")
+
+    tuning_results = tune_C(X_train, y_train)
+    print_tuning_table(tuning_results)
+
+    # the test set is scored only after C is frozen
+    pipeline = train_final_model(X_train, y_train, C)
+    probabilities, predictions, metrics = evaluate_model(pipeline, X_test, y_test)
+
+    metrics_row = {
+        "seed": seed,
+        "C": C,
+        "n_train": len(X_train),
+        "n_test": len(X_test),
+        **metrics,
+    }
+
+    save_table(pd.DataFrame([metrics_row]), f"logistic_metrics_seed{seed}.csv")
+
+    save_table(
+        pd.DataFrame({
+            "row_id": test_ids.values,
+            "actual": y_test.values,
+            "predicted_probability": probabilities,
+            "predicted_class": predictions,
+        }),
+        f"logistic_predictions_seed{seed}.csv",
+    )
+
+    coefficients = extract_coefficients(pipeline)
+    save_table(coefficients, "logistic_coefficients.csv")
+
+    print(f"\n=== test metrics (seed {seed}, C={C}) ===")
+    for name, value in metrics_row.items():
+        print(f"  {name:16} {value}")
+
+    print(f"\n=== coefficients (C={C}) ===")
+    print(coefficients.to_string(index=False))
+    print(f"\nintercept: {pipeline.named_steps['logreg'].intercept_[0]:.4f}")
+    print(f"priors SD used for scaling: {get_priors_scale(pipeline):.4f}")
+
+    return pipeline, metrics_row, coefficients
+
+
+def run_robustness_experiment(C):  # P1-9: repeat fixed model logic across all seeds
+    data = load_clean_data()
+
+    seed_rows = []
+    coefficient_rows = []
+
+    for seed in VALID_SEEDS:
+        X_train, X_test, y_train, y_test, _ = build_train_test_sets(data, load_split(seed))
+
+        pipeline = train_final_model(X_train, y_train, C)
+        _, _, metrics = evaluate_model(pipeline, X_test, y_test)
+
+        seed_rows.append({"seed": seed, "C": C, **metrics})
+
+        for row in extract_coefficients(pipeline).itertuples(index=False):
+            coefficient_rows.append({
+                "seed": seed,
+                "feature": row.feature,
+                "coefficient": row.coefficient,
+            })
+
+    robustness = pd.DataFrame(seed_rows)
+    save_table(robustness, "logistic_robustness_summary.csv")
+
+    coefficients_long = pd.DataFrame(coefficient_rows)
+
+    stability = (
+        coefficients_long.groupby("feature")["coefficient"]
+        .agg(
+            mean="mean",
+            std="std",
+            min="min",
+            max="max",
+            seeds_non_zero=lambda values: int((values != 0).sum()),
+            sign_stable=lambda values: len(set(np.sign(values[values != 0]))) <= 1,
+        )
+        .reset_index()
+        .sort_values("mean", key=abs, ascending=False)
+    )
+
+    save_table(stability, "logistic_coefficient_stability.csv")
+
+    print("\n=== robustness across seeds ===")
+    print(robustness.to_string(index=False))
+
+    print("\n=== coefficient stability ===")
+    print(stability.to_string(index=False))
+
+    print(f"\nAUC spread across seeds: "
+          f"{robustness['roc_auc'].max() - robustness['roc_auc'].min():.4f}")
+
+    return robustness, stability
+
+
+def main():
+    run_primary_experiment(PRIMARY_SEED, CHOSEN_C)
+    run_robustness_experiment(CHOSEN_C)
+
+
+# ensure run case of main()
+if __name__ == "__main__":
+    main()
