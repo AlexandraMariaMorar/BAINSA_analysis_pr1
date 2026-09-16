@@ -105,9 +105,9 @@ def build_pipeline(C):  # (inverse regularization strength; smaller = stronger p
     # random_state stays fixed across seeds so that seed-to-seed differences come
     # only from the split, not from the solver
     model = LogisticRegression(
-        l1_ratio=1,  # pure L1
+        l1_ratio=1,  # pure L1 the penalty; can force some coefficients to 0 -> sparse model
         solver="liblinear",
-        C=C,
+        C=C, # inverse regularization strength; smaller = stronger penalty = 1/lambda
         max_iter=1000,
         random_state=PRIMARY_SEED,
     )
@@ -157,7 +157,7 @@ def train_final_model(X_train, y_train, C):
 
 def evaluate_model(pipeline, X_test, y_test):
     probabilities = pipeline.predict_proba(X_test)[:, 1]  # column 1 = positive class
-    predictions = pipeline.predict(X_test)
+    predictions = pipeline.predict(X_test) # this funcion automatically uses a threshold of 0.5 to convert probabilities into binary predictions
 
     tn, fp, fn, tp = confusion_matrix(y_test, predictions).ravel()
 
@@ -189,7 +189,7 @@ def extract_coefficients(pipeline):
     return pd.DataFrame({
         "feature": feature_names,
         "coefficient": coefficients,
-        "odds_ratio": np.exp(coefficients),
+        "odds_ratio": np.exp(coefficients), #e to the power of coefficient; so a 1 unit increase in the feature x multiplies the predicted odds by approx e^coefficient
         "non_zero": coefficients != 0,
     })
 
@@ -213,7 +213,7 @@ def print_tuning_table(tuning_results):
     print("\nC               = regularization strength; SMALLER = stronger penalty = simpler model")
     print("CV AUC mean     = average ROC-AUC over 5 training folds")
     print("CV AUC std      = spread across those folds; gaps smaller than this are noise, not signal")
-    print("non-zero coefs  = how many of the 5 features survived L1 shrinkage")
+    print("non-zero coefs  = how many of the 5 features survived L1 shrinkage") #l1 is a penalty for large coefficients; it can force some coef to be 0 -> the feature disappears from the prediction
 
     print(f"\n{'C':>6} {'CV AUC mean':>12} {'CV AUC std':>11} {'non-zero coefs':>15}")
 
